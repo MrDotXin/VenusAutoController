@@ -14,13 +14,64 @@ import httpx
 import os
 from dotenv import load_dotenv
 import threading
+import time
+import logging
 
 load_dotenv()
 
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # 全局隧道实例
 _tunnel_instance = None
 _tunnel_lock = threading.Lock()
+_heartbeat_thread = None
+_heartbeat_running = False
+
+
+def heartbeat_monitor():
+    """心跳监控线程，定期检查并维持SSH连接"""
+    global _tunnel_instance, _heartbeat_running
+    
+    while _heartbeat_running:
+        try:
+            with _tunnel_lock:
+                if _tunnel_instance is not None:
+                    if not _tunnel_instance.is_active:
+                        logger.warning("检测到SSH隧道断开，尝试重连...")
+                        try:
+                            _tunnel_instance.stop()
+                        except Exception:
+                            pass
+                        _tunnel_instance = None
+                        # 触发重连
+                        create_tunnel()
+                        logger.info("SSH隧道重连成功")
+                    else:
+                        # 连接正常，记录心跳
+                        logger.debug("SSH隧道心跳正常")
+        except Exception as e:
+            logger.error(f"心跳检测异常: {e}")
+        
+        # 每15秒检查一次
+        time.sleep(15)
+
+
+def start_heartbeat():
+    """启动心跳监控线程"""
+    global _heartbeat_thread, _heartbeat_running
+    _heartbeat_running = True
+    _heartbeat_thread = threading.Thread(target=heartbeat_monitor, daemon=True)
+    _heartbeat_thread.start()
+    logger.info("心跳监控线程已启动")
+
+
+def stop_heartbeat():
+    """停止心跳监控线程"""
+    global _heartbeat_running
+    _heartbeat_running = False
+    logger.info("心跳监控线程已停止")
 
 
 @asynccontextmanager
@@ -30,16 +81,18 @@ async def lifespan(app: FastAPI):
     # 启动时建立SSH隧道
     try:
         _tunnel_instance = get_tunnel()
-        print("SSH隧道已建立")
+        start_heartbeat()
+        logger.info("SSH隧道已建立")
     except Exception as e:
-        print(f"SSH隧道建立失败: {e}")
+        logger.error(f"SSH隧道建立失败: {e}")
     
     yield
     
-    # 关闭时断开SSH隧道
+    # 关闭时停止心跳并断开SSH隧道
+    stop_heartbeat()
     if _tunnel_instance:
         _tunnel_instance.stop()
-        print("SSH隧道已关闭")
+        logger.info("SSH隧道已关闭")
 
 
 app = FastAPI(title="SSH Proxy Server", description="SSH隧道代理服务", lifespan=lifespan)
@@ -64,19 +117,36 @@ SSH_CONFIG = {
     "local_port": int(os.getenv("LOCAL_PORT", 8000)),
 }
 
+def create_tunnel():
+    """创建新的SSH隧道"""
+    global _tunnel_instance
+    _tunnel_instance = SSHTunnelForwarder(
+        (SSH_CONFIG["host"], SSH_CONFIG["port"]),
+        ssh_username=SSH_CONFIG["username"],
+        ssh_password=SSH_CONFIG["password"],
+        remote_bind_address=(SSH_CONFIG["remote_host"], SSH_CONFIG["remote_port"]),
+        local_bind_address=("127.0.0.1", SSH_CONFIG["local_port"]),
+        set_keepalive=30,  # 每30秒发送SSH心跳包
+        allow_agent=False,  # 跳过SSH agent
+        ssh_pkey=None,  # 不使用私钥文件
+    )
+    _tunnel_instance.start()
+    return _tunnel_instance
+
+
 def get_tunnel():
     """获取或创建SSH隧道单例"""
     global _tunnel_instance
     with _tunnel_lock:
         if _tunnel_instance is None or not _tunnel_instance.is_active:
-            _tunnel_instance = SSHTunnelForwarder(
-                (SSH_CONFIG["host"], SSH_CONFIG["port"]),
-                ssh_username=SSH_CONFIG["username"],
-                ssh_password=SSH_CONFIG["password"],
-                remote_bind_address=(SSH_CONFIG["remote_host"], SSH_CONFIG["remote_port"]),
-                local_bind_address=("127.0.0.1", SSH_CONFIG["local_port"]),
-            )
-            _tunnel_instance.start()
+            if _tunnel_instance is not None:
+                logger.warning("SSH隧道已断开，正在重连...")
+                try:
+                    _tunnel_instance.stop()
+                except Exception:
+                    pass
+            create_tunnel()
+            logger.info("SSH隧道已建立/重连成功")
         return _tunnel_instance
 
 
@@ -85,6 +155,7 @@ LOGIN_PATH = "api/userAccount/userAccountLogin"
 EXPERIMENT_LIST_PATH = "api/experimentInstance/findExperimentInstanceList"
 GENERATE_EXP_CODE_PATH = "api/experimentInstance/generateExperimentCode"
 CREATE_INSTANCE_PATH = "api/instance/add"
+START_EXPERIMENT_PATH = "api/experimentInstance/startInstance"
 BASE_HEADERS = {
     "accept": "application/json, text/plain, */*",
     "appid": "api-server",
@@ -112,6 +183,11 @@ class AuthRequest(BaseModel):
 class CreateExperimentRequest(BaseModel):
     authorization: str
     name: str  # 实验名称
+
+
+class StartExperimentRequest(BaseModel):
+    authorization: str
+    exp_code: str  # 实验编号
 
 
 @app.post("/target/login")
@@ -188,6 +264,142 @@ async def get_experiments(req: ExperimentListRequest):
         raise HTTPException(status_code=502, detail=f"无法连接到内网服务: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取实验列表错误: {str(e)}")
+
+
+@app.post("/target/mock/start-experiment")
+async def start_experiment(req: StartExperimentRequest):
+    """
+    启动实验实例
+    访问: POST http://localhost:5000/target/start-experiment
+    Body: {"authorization": "token", "exp_code": "EXP202601230017"}
+    流程: 1. 获取实验列表 -> 2. 匹配 exp_code -> 3. 启动实验
+    """
+    try:
+        get_tunnel()
+        
+        headers = BASE_HEADERS.copy()
+        headers["authorization"] = req.authorization
+        headers["content-type"] = "application/json;charset=UTF-8"
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            # 步骤1: 获取实验列表
+            list_url = f"http://127.0.0.1:{SSH_CONFIG['local_port']}/{EXPERIMENT_LIST_PATH}"
+            list_response = await client.get(
+                url=list_url,
+                params={"pageNum": 1, "pageSize": 100},
+                headers=headers,
+            )
+            list_response.raise_for_status()
+            
+            data = list_response.json()
+            
+            # 提取列表数据
+            items = []
+            if isinstance(data, dict) and "data" in data:
+                if isinstance(data["data"], list):
+                    items = data["data"]
+                elif isinstance(data["data"], dict) and "list" in data["data"]:
+                    items = data["data"]["list"]
+            
+            # 步骤2: 匹配 exp_code
+            target_item = None
+            for item in items:
+                if item.get("experienceCode") == req.exp_code:
+                    target_item = item
+                    break
+            
+            if not target_item:
+                raise HTTPException(status_code=404, detail=f"未找到实验编号: {req.exp_code}")
+            
+            print(target_item)            
+            # 步骤3: 启动实验
+            # start_url = f"http://127.0.0.1:{SSH_CONFIG['local_port']}/{START_EXPERIMENT_PATH}"
+            # start_response = await client.post(
+            #     url=start_url,
+            #     json=target_item,
+            #     headers=headers,
+            # )
+            print("模拟发送接口!")
+            
+            return Response(
+                content='ok',#start_response.content,
+                status_code=200,#start_response.status_code,
+                media_type="application/json",
+            )
+    
+    except httpx.ConnectError as e:
+        raise HTTPException(status_code=502, detail=f"无法连接到内网服务: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"启动实验错误: {str(e)}")
+
+@app.post("/target/start-experiment")
+async def start_experiment(req: StartExperimentRequest):
+    """
+    启动实验实例
+    访问: POST http://localhost:5000/target/start-experiment
+    Body: {"authorization": "token", "exp_code": "EXP202601230017"}
+    流程: 1. 获取实验列表 -> 2. 匹配 exp_code -> 3. 启动实验
+    """
+    try:
+        get_tunnel()
+        
+        headers = BASE_HEADERS.copy()
+        headers["authorization"] = req.authorization
+        headers["content-type"] = "application/json;charset=UTF-8"
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            # 步骤1: 获取实验列表
+            list_url = f"http://127.0.0.1:{SSH_CONFIG['local_port']}/{EXPERIMENT_LIST_PATH}"
+            list_response = await client.get(
+                url=list_url,
+                params={"pageNum": 1, "pageSize": 100},
+                headers=headers,
+            )
+            list_response.raise_for_status()
+            
+            data = list_response.json()
+            
+            # 提取列表数据
+            items = []
+            if isinstance(data, dict) and "data" in data:
+                if isinstance(data["data"], list):
+                    items = data["data"]
+                elif isinstance(data["data"], dict) and "list" in data["data"]:
+                    items = data["data"]["list"]
+            
+            # 步骤2: 匹配 exp_code
+            target_item = None
+            for item in items:
+                if item.get("experienceCode") == req.exp_code:
+                    target_item = item
+                    break
+            
+            if not target_item:
+                raise HTTPException(status_code=404, detail=f"未找到实验编号: {req.exp_code}")
+            
+            print(target_item)            
+            # 步骤3: 启动实验
+            start_url = f"http://127.0.0.1:{SSH_CONFIG['local_port']}/{START_EXPERIMENT_PATH}"
+            start_response = await client.post(
+                url=start_url,
+                json=target_item,
+                headers=headers,
+            )
+            
+            return Response(
+                content=start_response.content,
+                status_code=start_response.status_code,
+                media_type="application/json",
+            )
+    
+    except httpx.ConnectError as e:
+        raise HTTPException(status_code=502, detail=f"无法连接到内网服务: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"启动实验错误: {str(e)}")
 
 
 @app.post("/target/experimentInstance/generateExperimentCode")
