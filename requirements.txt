@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+sshtunnel
+paramiko
+httpx
+python-dotenv
