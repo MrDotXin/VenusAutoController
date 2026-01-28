@@ -1,7 +1,6 @@
 """
-"""
 SRS 截图服务模块
-从SRS 服务器定时获取 RTMP 流截图
+从 SRS 服务器定时获取 RTMP 流截图
 """
 import logging
 import subprocess
@@ -58,7 +57,7 @@ class SnapshotService:
         return _snapshots
     
     def register_stream(self, stream_key: str) -> bool:
-        """注册一个流（开始定时截图）"""
+        """注册一个流(开始定时截图)"""
         if stream_key in _snapshots:
             return False
         
@@ -168,7 +167,7 @@ class SnapshotService:
         }
     
     def list_streams(self) -> list:
-        """列出所有已注册的流（截图服务）"""
+        """列出所有已注册的流(截图服务)"""
         return [self.get_status(key) for key in _snapshots.keys()]
     
     def list_srs_streams(self) -> List[dict]:
