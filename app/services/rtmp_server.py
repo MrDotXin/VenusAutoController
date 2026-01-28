@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RTMPStream:
-    """RTMP流信息"""
+    """流信息"""
     stream_key: str
     app: str = "live"
     frame_count: int = 0
@@ -28,7 +28,7 @@ class RTMPStream:
 class RTMPServer:
     """
     RTMP服务器
-    使用pyrtmp接收推流，ffmpeg转码
+    使用原生TCP接收RTMP推流
     """
     _instance = None
     _lock = threading.Lock()
@@ -47,88 +47,108 @@ class RTMPServer:
         self._initialized = True
         self.streams: Dict[str, RTMPStream] = {}
         self.port = 1935
-        self._server_task = None
+        self._server = None
         self._running = False
         logger.info("RTMP服务器初始化完成")
     
     async def start(self, port: int = 1935):
         """启动RTMP服务器"""
-        from pyrtmp import StreamClosedException
-        from pyrtmp.flv import FLVFileWriter, FLVMediaType
-        from pyrtmp.session_manager import SessionManager
-        from pyrtmp.rtmp import SimpleRTMPController, RTMPProtocol
-        
         self.port = port
         self._running = True
         
-        controller = SimpleRTMPController()
-        
-        @controller.on_connect
-        async def on_connect(session_id, message):
-            logger.info(f"[RTMP] 连接: session={session_id}")
-            return True
-        
-        @controller.on_publish
-        async def on_publish(session_id, message):
-            stream_key = message.publishing_name
-            app = message.publishing_type
-            logger.info(f"[RTMP] 推流开始: {app}/{stream_key}")
-            
-            # 创建流
-            self.streams[stream_key] = RTMPStream(
-                stream_key=stream_key,
-                app=app,
-                last_update=time.time()
-            )
-            
-            # 启动ffmpeg转码
-            self._start_ffmpeg(stream_key)
-            return True
-        
-        @controller.on_video
-        async def on_video(session_id, message):
-            stream_key = self._get_stream_key(session_id)
-            if stream_key and stream_key in self.streams:
-                stream = self.streams[stream_key]
-                stream.frame_count += 1
-                stream.last_update = time.time()
-                
-                # 写入ffmpeg stdin
-                if stream.ffmpeg_process and stream.ffmpeg_process.stdin:
-                    try:
-                        stream.ffmpeg_process.stdin.write(message.payload)
-                    except:
-                        pass
-        
-        @controller.on_stream_closed
-        async def on_stream_closed(session_id, message):
-            stream_key = self._get_stream_key(session_id)
-            logger.info(f"[RTMP] 流关闭: {stream_key}")
-            if stream_key:
-                self._stop_ffmpeg(stream_key)
-        
-        session_manager = SessionManager(controller=controller)
-        
         try:
-            server = await asyncio.start_server(
-                lambda r, w: RTMPProtocol(controller=controller, session_manager=session_manager).connection_made(r, w),
-                '0.0.0.0', 
+            self._server = await asyncio.start_server(
+                self._handle_client,
+                '0.0.0.0',
                 port
             )
             logger.info(f"RTMP服务器启动: rtmp://0.0.0.0:{port}")
             
-            async with server:
-                await server.serve_forever()
+            async with self._server:
+                await self._server.serve_forever()
         except Exception as e:
             logger.error(f"RTMP服务器错误: {e}")
     
-    def _get_stream_key(self, session_id) -> Optional[str]:
-        """根据session_id获取stream_key"""
-        # 简化处理，返回第一个活跃的流
-        for key, stream in self.streams.items():
-            if stream._running:
-                return key
-        return None
+    async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        """处理客户端连接"""
+        addr = writer.get_extra_info('peername')
+        logger.info(f"[RTMP] 新连接: {addr}")
+        
+        stream_key = None
+        try:
+            # 简化的RTMP握手处理
+            # 读取C0+C1
+            c0c1 = await asyncio.wait_for(reader.read(1537), timeout=10)
+            if len(c0c1) < 1537:
+                logger.warning(f"[RTMP] 握手失败: 数据不足 {len(c0c1)} bytes")
+                return
+            
+            logger.info(f"[RTMP] 收到C0+C1: {len(c0c1)} bytes")
+            
+            # 发送S0+S1+S2
+            s0 = bytes([3])  # RTMP版本
+            s1 = b'\x00' * 4 + b'\x00' * 4 + c0c1[1:1537][:1528]  # 时间戳 + 零 + 随机数据
+            s2 = c0c1[1:1537]  # 回显c1
+            writer.write(s0 + s1 + s2)
+            await writer.drain()
+            logger.info(f"[RTMP] 发送S0+S1+S2")
+            
+            # 读取C2
+            c2 = await asyncio.wait_for(reader.read(1536), timeout=10)
+            logger.info(f"[RTMP] 收到C2: {len(c2)} bytes")
+            
+            # 握手完成，开始接收RTMP消息
+            logger.info(f"[RTMP] 握手完成: {addr}")
+            
+            # 为这个连接创建流
+            stream_key = f"stream_{int(time.time())}"
+            self.streams[stream_key] = RTMPStream(
+                stream_key=stream_key,
+                last_update=time.time()
+            )
+            stream = self.streams[stream_key]
+            
+            # 启动ffmpeg
+            self._start_ffmpeg(stream_key)
+            
+            # 读取RTMP数据并写入ffmpeg
+            while self._running and stream._running:
+                try:
+                    data = await asyncio.wait_for(reader.read(4096), timeout=30)
+                    if not data:
+                        logger.info(f"[RTMP] 连接关闭: {addr}")
+                        break
+                    
+                    stream.frame_count += 1
+                    stream.last_update = time.time()
+                    
+                    # 写入ffmpeg
+                    if stream.ffmpeg_process and stream.ffmpeg_process.stdin:
+                        try:
+                            stream.ffmpeg_process.stdin.write(data)
+                            stream.ffmpeg_process.stdin.flush()
+                        except:
+                            pass
+                    
+                    # 每1000个包输出一次统计
+                    if stream.frame_count % 1000 == 0:
+                        logger.info(f"[{stream_key}] 已接收 {stream.frame_count} 个数据包")
+                        
+                except asyncio.TimeoutError:
+                    logger.warning(f"[RTMP] 超时无数据: {addr}")
+                    break
+                    
+        except asyncio.TimeoutError:
+            logger.warning(f"[RTMP] 握手超时: {addr}")
+        except Exception as e:
+            logger.error(f"[RTMP] 处理错误: {addr} - {e}")
+        finally:
+            writer.close()
+            if stream_key:
+                self._stop_ffmpeg(stream_key)
+                if stream_key in self.streams:
+                    del self.streams[stream_key]
+            logger.info(f"[RTMP] 连接结束: {addr}")
     
     def _start_ffmpeg(self, stream_key: str):
         """启动ffmpeg转码进程"""
@@ -160,7 +180,7 @@ class RTMPServer:
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL
+                stderr=subprocess.PIPE
             )
             stream._running = True
             
@@ -182,6 +202,7 @@ class RTMPServer:
             return
         
         buffer = b''
+        frame_count = 0
         while stream._running:
             try:
                 chunk = stream.ffmpeg_process.stdout.read(4096)
@@ -204,11 +225,14 @@ class RTMPServer:
                     frame = buffer[start:end + 2]
                     stream.last_frame = frame
                     buffer = buffer[end + 2:]
+                    frame_count += 1
+                    
+                    if frame_count % 100 == 0:
+                        logger.info(f"[{stream_key}] 已转码 {frame_count} 帧")
                     
             except Exception as e:
                 logger.error(f"[{stream_key}] 读取ffmpeg输出错误: {e}")
                 break
-    
     def _stop_ffmpeg(self, stream_key: str):
         """停止ffmpeg进程"""
         stream = self.streams.get(stream_key)
