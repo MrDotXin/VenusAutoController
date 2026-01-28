@@ -29,6 +29,29 @@ async def push_frame(stream_id: str, request: Request):
     return {"success": True}
 
 
+@router.api_route("/{stream_id}/{path:path}", methods=["GET", "POST", "PUT", "PATCH"])
+async def camera_wildcard(stream_id: str, path: str, request: Request):
+    """
+    通配路由 - 适配不同摄像头协议
+    摄像头配置: http://服务器/camera/摄像头ID
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    content_type = request.headers.get("content-type", "")
+    body = await request.body()
+    
+    logger.info(f"[{stream_id}] {request.method} /{path} Content-Type: {content_type} Size: {len(body)} bytes")
+    
+    # 如果是图片数据，保存帧
+    if body and ("image" in content_type or len(body) > 1000):
+        stream_receiver.receive_frame(stream_id, body)
+        return {"success": True}
+    
+    # 其他请求（心跳等）返回成功
+    return {"success": True}
+
+
 # ============== 查看视频流 ==============
 
 @router.get("/view/{stream_id}")
