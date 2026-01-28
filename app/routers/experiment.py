@@ -113,6 +113,7 @@ async def start_experiment(req: StartExperimentRequest):
 
 
 @router.post("/mock/start-expirement")
+@router.post("/mock/start-experiment")
 async def mock_start_expirement(req: StartExperimentRequest):
     """（Mock）启动实验：返回匹配的实验 item，不真正触发启动"""
     try:

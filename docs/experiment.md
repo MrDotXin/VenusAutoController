@@ -20,7 +20,9 @@
 
 ## 启动实验（Mock）
 
-- 路径：`POST /target/mock/start-expirement`
+- 路径：
+  - `POST /target/mock/start-expirement`（兼容旧拼写）
+  - `POST /target/mock/start-experiment`（推荐，与你现在前端请求一致）
 - 作用：
   - 与真实启动流程一致：会拉取实验列表并按 `exp_code` 匹配
   - 但最后一步“发送启动实验请求”被注释掉
