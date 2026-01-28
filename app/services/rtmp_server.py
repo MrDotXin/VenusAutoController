@@ -62,6 +62,7 @@ class CameraRTMPController(SimpleRTMPController):
     
     async def on_video_message(self, session: SessionManager, message: VideoMessage) -> None:
         """处理视频数据"""
+        logger.debug(f"[RTMP] 收到视频消息: {len(message.payload)} bytes")
         if not self.stream_key:
             return
         
@@ -90,6 +91,10 @@ class CameraRTMPController(SimpleRTMPController):
     async def cleanup(self, session: SessionManager) -> None:
         """连接结束时清理"""
         self._cleanup()
+    
+    async def on_unknown_message(self, session: SessionManager, message) -> None:
+        """记录未知消息"""
+        logger.debug(f"[RTMP] 未知消息: {type(message).__name__}")
     
     def _cleanup(self):
         if self.stream_key:
