@@ -35,5 +35,6 @@ BASE_HEADERS = {
 # SRS流媒体服务器配置
 SRS_CONFIG = {
     "rtmp_url": os.getenv("SRS_RTMP_URL", "rtmp://localhost:1935/live"),
-    "api_url": os.getenv("SRS_API_URL", "http://localhost:5002"),
+    "http_url": os.getenv("SRS_HTTP_URL", "http://localhost:5002"),
+    "api_url": os.getenv("SRS_API_URL", "http://localhost:1985"),
 }
