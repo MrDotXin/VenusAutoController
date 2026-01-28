@@ -7,7 +7,7 @@ import logging
 import subprocess
 import threading
 import time
-from typing import Dict, Optional, Generator
+from typing import Dict, Optional, Generator, AsyncGenerator
 from dataclasses import dataclass
 
 from pyrtmp import StreamClosedException
@@ -37,6 +37,43 @@ class RTMPStream:
     last_frame: Optional[bytes] = None
     ffmpeg_process: Optional[subprocess.Popen] = None
     _running: bool = False
+    _flv_header_sent: bool = False  # 是否已发送FLV头
+    _base_timestamp: int = 0        # 基准时间戳
+
+
+def _build_flv_header() -> bytes:
+    """构建FLV文件头"""
+    # FLV signature + version
+    header = b'FLV\x01'
+    # Flags: 0x01 = video only, 0x04 = audio only, 0x05 = both
+    header += b'\x01'  # video only
+    # Header size (9 bytes)
+    header += b'\x00\x00\x00\x09'
+    # Previous tag size 0 (first tag)
+    header += b'\x00\x00\x00\x00'
+    return header
+
+
+def _build_flv_tag(tag_type: int, timestamp: int, data: bytes) -> bytes:
+    """构建FLV标签"""
+    data_size = len(data)
+    
+    # Tag header (11 bytes)
+    tag = bytes([tag_type])  # Tag type: 8=audio, 9=video, 18=script
+    tag += bytes([(data_size >> 16) & 0xFF, (data_size >> 8) & 0xFF, data_size & 0xFF])  # Data size (3 bytes)
+    tag += bytes([(timestamp >> 16) & 0xFF, (timestamp >> 8) & 0xFF, timestamp & 0xFF])  # Timestamp (3 bytes)
+    tag += bytes([(timestamp >> 24) & 0xFF])  # Timestamp extended
+    tag += b'\x00\x00\x00'  # Stream ID (always 0)
+    
+    # Tag data
+    tag += data
+    
+    # Previous tag size (4 bytes)
+    prev_tag_size = 11 + data_size
+    tag += bytes([(prev_tag_size >> 24) & 0xFF, (prev_tag_size >> 16) & 0xFF, 
+                  (prev_tag_size >> 8) & 0xFF, prev_tag_size & 0xFF])
+    
+    return tag
 
 
 class CameraRTMPController(SimpleRTMPController):
@@ -121,10 +158,24 @@ class CameraRTMPController(SimpleRTMPController):
         # 写入ffmpeg
         if stream.ffmpeg_process and stream.ffmpeg_process.stdin:
             try:
-                stream.ffmpeg_process.stdin.write(message.payload)
+                # 首次写入FLV头
+                if not stream._flv_header_sent:
+                    stream.ffmpeg_process.stdin.write(_build_flv_header())
+                    stream._flv_header_sent = True
+                    stream._base_timestamp = message.timestamp
+                
+                # 计算相对时间戳
+                ts = message.timestamp - stream._base_timestamp
+                if ts < 0:
+                    ts = 0
+                
+                # 构建FLV视频标签并写入
+                flv_tag = _build_flv_tag(9, ts, message.payload)  # 9 = video tag
+                stream.ffmpeg_process.stdin.write(flv_tag)
                 stream.ffmpeg_process.stdin.flush()
-            except:
-                pass
+            except Exception as e:
+                if stream.packet_count < 10:
+                    logger.error(f"[{self.stream_key}] 写入ffmpeg失败: {e}")
         
         if stream.packet_count % 500 == 0:
             logger.info(f"[{self.stream_key}] 已接收 {stream.packet_count} 个视频包")
@@ -205,12 +256,13 @@ def _start_ffmpeg(stream_key: str):
     
     cmd = [
         ffmpeg_cmd,
-        '-f', 'h264',
+        '-f', 'flv',           # RTMP 使用 FLV 封装
         '-i', 'pipe:0',
         '-f', 'image2pipe',
         '-vcodec', 'mjpeg',
         '-q:v', '5',
         '-r', '15',
+        '-an',                  # 忽略音频
         'pipe:1'
     ]
     
@@ -350,11 +402,17 @@ class RTMPServer:
         stream = _streams.get(stream_key)
         return stream.last_frame if stream else None
     
-    def generate_mjpeg(self, stream_key: str) -> Generator[bytes, None, None]:
+    async def generate_mjpeg(self, stream_key: str) -> AsyncGenerator[bytes, None]:
+        """异步生成 MJPEG 流，避免阻塞事件循环"""
         last_frame = None
+        no_frame_count = 0
         while True:
             stream = _streams.get(stream_key)
-            if stream and stream.last_frame:
+            if not stream:
+                break
+            
+            if stream.last_frame:
+                no_frame_count = 0
                 if stream.last_frame != last_frame:
                     last_frame = stream.last_frame
                     yield (
@@ -363,7 +421,14 @@ class RTMPServer:
                         stream.last_frame +
                         b'\r\n'
                     )
-            time.sleep(0.05)
+            else:
+                no_frame_count += 1
+                # 如果超过 10 秒没有帧，退出
+                if no_frame_count > 200:
+                    logger.warning(f"[{stream_key}] 长时间无帧，停止流")
+                    break
+            
+            await asyncio.sleep(0.05)
     
     def get_status(self, stream_key: str) -> Optional[dict]:
         stream = _streams.get(stream_key)
