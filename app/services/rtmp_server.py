@@ -72,7 +72,15 @@ class CameraRTMPController(SimpleRTMPController):
             from pyrtmp.messages.factory import MessageFactory
             async for chunk in session.read_chunks_from_stream():
                 message = MessageFactory.from_chunk(chunk)
-                logger.debug(f"[RTMP] 收到消息: {type(message).__name__}")
+                # 打印完整消息结构
+                logger.info(f"[RTMP] <<< 收到: {type(message).__name__}")
+                logger.info(f"        chunk_id={chunk.chunk_id}, msg_type={chunk.msg_type_id}, len={len(chunk.payload)}")
+                if hasattr(message, 'command_name'):
+                    logger.info(f"        command_name={message.command_name}")
+                if hasattr(message, 'transaction_id'):
+                    logger.info(f"        transaction_id={message.transaction_id}")
+                if hasattr(message, 'command_object') and message.command_object:
+                    logger.info(f"        command_object={message.command_object}")
                 await self.handle_message(session, message)
                 
         except StreamClosedException:
@@ -110,8 +118,10 @@ class CameraRTMPController(SimpleRTMPController):
     
     async def on_ns_publish(self, session: SessionManager, message: NSPublish) -> None:
         """收到publish命令时创建流"""
-        # 先调用父类处理协议响应
+        # 先调用父类处理协议响应 (StreamBegin + onStatus)
+        logger.info(f"[RTMP] 发送 publish 响应...")
         await super().on_ns_publish(session, message)
+        logger.info(f"[RTMP] publish 响应已发送")
         
         # 创建流
         app = getattr(session, '_app', 'live')
@@ -165,14 +175,28 @@ class CameraRTMPController(SimpleRTMPController):
         
         if hasattr(message, 'command_name'):
             cmd = message.command_name
-            tid = getattr(message, 'transaction_id', 2)  # 默认2
+            
+            # 从payload中解析transaction_id
+            tid = self._parse_transaction_id(message.payload)
             
             if cmd in ('releaseStream', 'FCPublish'):
-                logger.info(f"[RTMP] 响应 {cmd} (tid={tid})")
-                # 手动构建 _result 响应
                 response = self._create_result_response(message.chunk_id, tid)
+                logger.info(f"[RTMP] >>> 发送: _result for {cmd}")
+                logger.info(f"        tid={tid}, chunk_id={response.chunk_id}, payload={response.payload.hex()}")
                 session.write_chunk_to_stream(response)
                 await session.drain()
+    
+    def _parse_transaction_id(self, payload: bytes) -> int:
+        """从payload中解析transaction_id"""
+        try:
+            from bitstring import BitStream
+            from pyrtmp.amf.serializers import AMF0Deserializer
+            data = BitStream(payload)
+            AMF0Deserializer.from_stream(data)  # command_name
+            tid = AMF0Deserializer.from_stream(data)  # transaction_id
+            return int(tid) if tid else 0
+        except:
+            return 0
     
     def _create_result_response(self, chunk_id: int, transaction_id: int) -> Chunk:
         """创建 _result 响应"""
