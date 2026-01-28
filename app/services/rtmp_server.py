@@ -47,78 +47,42 @@ class CameraRTMPController(SimpleRTMPController):
         self._last_bytes = 0
     
     async def client_callback(self, reader, writer):
-        """覆盖以添加字节监控"""
-        import asyncio
-        
-        # 启动字节监控任务
-        async def monitor_bytes(session):
-            while True:
-                await asyncio.sleep(5)
-                current = session.total_read_bytes
-                delta = current - self._last_bytes
-                logger.info(f"[RTMP] 5秒内收到 {delta} 字节 (总计 {current} 字节)")
-                self._last_bytes = current
-                if delta == 0:
-                    logger.warning("[RTMP] 没有收到新数据!")
-        
-        # 创建session后启动监控
+        """处理RTMP客户端连接"""
         session = SessionManager(reader=reader, writer=writer)
-        monitor_task = asyncio.create_task(monitor_bytes(session))
         
         try:
             await session.handshake()
-            logger.info(f"[RTMP] 握手完成: {session.peername}")
+            logger.info(f"[RTMP] 新连接: {session.peername}")
             
             from pyrtmp.messages.factory import MessageFactory
             async for chunk in session.read_chunks_from_stream():
                 message = MessageFactory.from_chunk(chunk)
-                # 打印完整消息结构
-                logger.info(f"[RTMP] <<< 收到: {type(message).__name__}")
-                logger.info(f"        chunk_id={chunk.chunk_id}, msg_type={chunk.msg_type_id}, len={len(chunk.payload)}")
-                if hasattr(message, 'command_name'):
-                    logger.info(f"        command_name={message.command_name}")
-                if hasattr(message, 'transaction_id'):
-                    logger.info(f"        transaction_id={message.transaction_id}")
-                if hasattr(message, 'command_object') and message.command_object:
-                    logger.info(f"        command_object={message.command_object}")
                 await self.handle_message(session, message)
                 
         except StreamClosedException:
-            logger.info(f"[RTMP] 流关闭: {session.peername}")
+            logger.info(f"[RTMP] 连接关闭: {session.peername}")
         except Exception as e:
             logger.error(f"[RTMP] 错误: {e}")
         finally:
-            monitor_task.cancel()
             await self.cleanup(session)
             writer.close()
     
     async def handle_message(self, session: SessionManager, message):
         """消息路由"""
         if isinstance(message, NCConnect):
-            # 打印connect响应
-            response = message.create_response()
-            logger.info(f"[RTMP] >>> 发送: connect _result")
-            logger.info(f"        payload={response.payload.hex()[:100]}...")
             await self.on_nc_connect(session, message)
         elif isinstance(message, NCCreateStream):
-            response = message.create_response()
-            logger.info(f"[RTMP] >>> 发送: createStream _result")
-            logger.info(f"        payload={response.payload.hex()}")
             await self.on_nc_create_stream(session, message)
         elif isinstance(message, NSPublish):
-            response = message.create_response()
-            logger.info(f"[RTMP] >>> 发送: publish onStatus")
-            logger.info(f"        payload={response.payload.hex()}")
             await self.on_ns_publish(session, message)
         elif isinstance(message, VideoMessage):
             await self.on_video_message(session, message)
         elif isinstance(message, AudioMessage):
-            pass  # 忽略音频
+            pass
         elif isinstance(message, MetaDataMessage):
-            logger.debug(f"[RTMP] metadata")
+            pass
         elif isinstance(message, SetChunkSize):
             session.reader_chunk_size = message.chunk_size
-            logger.debug(f"[RTMP] chunk_size={message.chunk_size}")
         elif isinstance(message, WindowAcknowledgementSize):
             pass
         elif isinstance(message, (NSCloseStream, NSDeleteStream)):
@@ -128,19 +92,14 @@ class CameraRTMPController(SimpleRTMPController):
     
     async def on_ns_publish(self, session: SessionManager, message: NSPublish) -> None:
         """收到publish命令时创建流"""
-        # 先调用父类处理协议响应 (StreamBegin + onStatus)
-        logger.info(f"[RTMP] 发送 publish 响应...")
         await super().on_ns_publish(session, message)
-        logger.info(f"[RTMP] publish 响应已发送")
         
-        # 创建流
-        app = getattr(session, '_app', 'live')
-        self.stream_key = f"{app}_{message.publishing_name}_{int(time.time())}"
-        logger.info(f"[RTMP] publish: {message.publishing_name} -> {self.stream_key}")
+        # 使用固定的 publishing_name 作为 stream_key
+        self.stream_key = message.publishing_name
+        logger.info(f"[RTMP] 开始推流: {self.stream_key}")
         
         _streams[self.stream_key] = RTMPStream(
             stream_key=self.stream_key,
-            app=app,
             last_update=time.time()
         )
         
@@ -149,7 +108,6 @@ class CameraRTMPController(SimpleRTMPController):
     
     async def on_video_message(self, session: SessionManager, message: VideoMessage) -> None:
         """处理视频数据"""
-        logger.debug(f"[RTMP] 收到视频消息: {len(message.payload)} bytes")
         if not self.stream_key:
             return
         
@@ -181,18 +139,12 @@ class CameraRTMPController(SimpleRTMPController):
     
     async def on_unknown_message(self, session: SessionManager, message: Chunk) -> None:
         """处理未知消息 - 响应releaseStream和FCPublish"""
-        logger.debug(f"[RTMP] 未知消息: {type(message).__name__}")
-        
         if hasattr(message, 'command_name'):
             cmd = message.command_name
-            
-            # 从payload中解析transaction_id
             tid = self._parse_transaction_id(message.payload)
             
             if cmd in ('releaseStream', 'FCPublish'):
                 response = self._create_result_response(message.chunk_id, tid)
-                logger.info(f"[RTMP] >>> 发送: _result for {cmd}")
-                logger.info(f"        tid={tid}, chunk_id={response.chunk_id}, payload={response.payload.hex()}")
                 session.write_chunk_to_stream(response)
                 await session.drain()
     
