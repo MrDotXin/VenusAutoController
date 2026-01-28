@@ -85,7 +85,7 @@ class RTMPServer:
         except asyncio.TimeoutError:
             return None
     
-    async def _handle_client
+    async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """处理客户端连接"""
         addr = writer.get_extra_info('peername')
         logger.info(f"[RTMP] 新连接: {addr}")
