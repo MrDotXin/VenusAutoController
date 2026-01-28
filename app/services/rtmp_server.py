@@ -69,35 +69,54 @@ class RTMPServer:
         except Exception as e:
             logger.error(f"RTMP服务器错误: {e}")
     
-    async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def _read_exact(self, reader: asyncio.StreamReader, n: int, timeout: float = 10) -> Optional[bytes]:
+        """循环读取指定字节数"""
+        data = b''
+        try:
+            while len(data) < n:
+                chunk = await asyncio.wait_for(
+                    reader.read(n - len(data)),
+                    timeout=timeout
+                )
+                if not chunk:
+                    return None
+                data += chunk
+            return data
+        except asyncio.TimeoutError:
+            return None
+    
+    async def _handle_client
         """处理客户端连接"""
         addr = writer.get_extra_info('peername')
         logger.info(f"[RTMP] 新连接: {addr}")
         
         stream_key = None
         try:
-            # 简化的RTMP握手处理
-            # 读取C0+C1
-            c0c1 = await asyncio.wait_for(reader.read(1537), timeout=10)
-            if len(c0c1) < 1537:
-                logger.warning(f"[RTMP] 握手失败: 数据不足 {len(c0c1)} bytes")
+            # RTMP握手 - 循环读取确保收到完整数据
+            # 读取C0+C1 (1 + 1536 = 1537 bytes)
+            c0c1 = await self._read_exact(reader, 1537, timeout=10)
+            if not c0c1:
+                logger.warning(f"[RTMP] 握手失败: 读取C0+C1超时")
                 return
             
             logger.info(f"[RTMP] 收到C0+C1: {len(c0c1)} bytes")
             
             # 发送S0+S1+S2
             s0 = bytes([3])  # RTMP版本
-            s1 = b'\x00' * 4 + b'\x00' * 4 + c0c1[1:1537][:1528]  # 时间戳 + 零 + 随机数据
-            s2 = c0c1[1:1537]  # 回显c1
+            s1 = b'\x00' * 4 + b'\x00' * 4 + c0c1[1:][:1528]  # 时间戳 + 零 + 随机数据
+            s2 = c0c1[1:]  # 回显c1
             writer.write(s0 + s1 + s2)
             await writer.drain()
             logger.info(f"[RTMP] 发送S0+S1+S2")
             
-            # 读取C2
-            c2 = await asyncio.wait_for(reader.read(1536), timeout=10)
+            # 读取C2 (1536 bytes)
+            c2 = await self._read_exact(reader, 1536, timeout=10)
+            if not c2:
+                logger.warning(f"[RTMP] 握手失败: 读取C2超时")
+                return
             logger.info(f"[RTMP] 收到C2: {len(c2)} bytes")
             
-            # 握手完成，开始接收RTMP消息
+            # 握手完成
             logger.info(f"[RTMP] 握手完成: {addr}")
             
             # 为这个连接创建流
