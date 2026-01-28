@@ -1,1 +1,1 @@
-from .camera import camera_manager, frame_receiver
+from .camera import stream_receiver
