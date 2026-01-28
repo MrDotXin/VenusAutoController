@@ -160,15 +160,39 @@ class CameraRTMPController(SimpleRTMPController):
         self._cleanup()
     
     async def on_unknown_message(self, session: SessionManager, message: Chunk) -> None:
-        """处理未知消息 - 尝试响应releaseStream和FCPublish"""
+        """处理未知消息 - 响应releaseStream和FCPublish"""
         logger.debug(f"[RTMP] 未知消息: {type(message).__name__}")
-        # 某些摄像头需要这些命令的响应
+        
         if hasattr(message, 'command_name'):
             cmd = message.command_name
+            tid = getattr(message, 'transaction_id', 2)  # 默认2
+            
             if cmd in ('releaseStream', 'FCPublish'):
-                logger.info(f"[RTMP] 响应 {cmd}")
-                # 发送空的_result响应
+                logger.info(f"[RTMP] 响应 {cmd} (tid={tid})")
+                # 手动构建 _result 响应
+                response = self._create_result_response(message.chunk_id, tid)
+                session.write_chunk_to_stream(response)
                 await session.drain()
+    
+    def _create_result_response(self, chunk_id: int, transaction_id: int) -> Chunk:
+        """创建 _result 响应"""
+        from bitstring import BitStream
+        from pyrtmp.amf.serializers import AMF0Serializer
+        
+        data = BitStream()
+        AMF0Serializer.create_object(data, "_result")
+        AMF0Serializer.create_object(data, transaction_id)
+        AMF0Serializer.create_object(data, None)  # command object
+        
+        return Chunk(
+            chunk_type=0,
+            chunk_id=chunk_id,
+            timestamp=0,
+            msg_length=len(data.bytes),
+            msg_type_id=0x14,  # AMF0 command
+            msg_stream_id=0,
+            payload=data.bytes,
+        )
     
     def _cleanup(self):
         if self.stream_key:
