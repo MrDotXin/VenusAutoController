@@ -14,7 +14,11 @@ from pyrtmp import StreamClosedException
 from pyrtmp.session_manager import SessionManager
 from pyrtmp.rtmp import SimpleRTMPController
 from pyrtmp.messages.video import VideoMessage
-from pyrtmp.messages.command import NSPublish
+from pyrtmp.messages.audio import AudioMessage
+from pyrtmp.messages.data import MetaDataMessage
+from pyrtmp.messages.command import NCConnect, NCCreateStream, NSPublish, NSCloseStream, NSDeleteStream
+from pyrtmp.messages.protocol_control import SetChunkSize, WindowAcknowledgementSize
+from pyrtmp.messages import Chunk
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +44,69 @@ class CameraRTMPController(SimpleRTMPController):
     
     def __init__(self):
         self.stream_key: Optional[str] = None
+        self._last_bytes = 0
+    
+    async def client_callback(self, reader, writer):
+        """覆盖以添加字节监控"""
+        import asyncio
+        
+        # 启动字节监控任务
+        async def monitor_bytes(session):
+            while True:
+                await asyncio.sleep(5)
+                current = session.total_read_bytes
+                delta = current - self._last_bytes
+                logger.info(f"[RTMP] 5秒内收到 {delta} 字节 (总计 {current} 字节)")
+                self._last_bytes = current
+                if delta == 0:
+                    logger.warning("[RTMP] 没有收到新数据!")
+        
+        # 创建session后启动监控
+        session = SessionManager(reader=reader, writer=writer)
+        monitor_task = asyncio.create_task(monitor_bytes(session))
+        
+        try:
+            await session.handshake()
+            logger.info(f"[RTMP] 握手完成: {session.peername}")
+            
+            from pyrtmp.messages.factory import MessageFactory
+            async for chunk in session.read_chunks_from_stream():
+                message = MessageFactory.from_chunk(chunk)
+                logger.debug(f"[RTMP] 收到消息: {type(message).__name__}")
+                await self.handle_message(session, message)
+                
+        except StreamClosedException:
+            logger.info(f"[RTMP] 流关闭: {session.peername}")
+        except Exception as e:
+            logger.error(f"[RTMP] 错误: {e}")
+        finally:
+            monitor_task.cancel()
+            await self.cleanup(session)
+            writer.close()
+    
+    async def handle_message(self, session: SessionManager, message):
+        """消息路由"""
+        if isinstance(message, NCConnect):
+            await self.on_nc_connect(session, message)
+        elif isinstance(message, NCCreateStream):
+            await self.on_nc_create_stream(session, message)
+        elif isinstance(message, NSPublish):
+            await self.on_ns_publish(session, message)
+        elif isinstance(message, VideoMessage):
+            await self.on_video_message(session, message)
+        elif isinstance(message, AudioMessage):
+            pass  # 忽略音频
+        elif isinstance(message, MetaDataMessage):
+            logger.debug(f"[RTMP] metadata")
+        elif isinstance(message, SetChunkSize):
+            session.reader_chunk_size = message.chunk_size
+            logger.debug(f"[RTMP] chunk_size={message.chunk_size}")
+        elif isinstance(message, WindowAcknowledgementSize):
+            pass
+        elif isinstance(message, (NSCloseStream, NSDeleteStream)):
+            self._cleanup()
+        else:
+            await self.on_unknown_message(session, message)
     
     async def on_ns_publish(self, session: SessionManager, message: NSPublish) -> None:
         """收到publish命令时创建流"""
@@ -92,9 +159,16 @@ class CameraRTMPController(SimpleRTMPController):
         """连接结束时清理"""
         self._cleanup()
     
-    async def on_unknown_message(self, session: SessionManager, message) -> None:
-        """记录未知消息"""
+    async def on_unknown_message(self, session: SessionManager, message: Chunk) -> None:
+        """处理未知消息 - 尝试响应releaseStream和FCPublish"""
         logger.debug(f"[RTMP] 未知消息: {type(message).__name__}")
+        # 某些摄像头需要这些命令的响应
+        if hasattr(message, 'command_name'):
+            cmd = message.command_name
+            if cmd in ('releaseStream', 'FCPublish'):
+                logger.info(f"[RTMP] 响应 {cmd}")
+                # 发送空的_result响应
+                await session.drain()
     
     def _cleanup(self):
         if self.stream_key:
