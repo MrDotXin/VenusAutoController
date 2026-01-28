@@ -173,7 +173,8 @@ class SnapshotService:
     def list_srs_streams(self) -> List[dict]:
         """从SRS获取当前在线的流列表"""
         try:
-            resp = httpx.get(f"{SRS_API_URL}/api/v1/streams", timeout=3)
+            # SRS API 需要尾部斜杠，否则返回 302
+            resp = httpx.get(f"{SRS_API_URL}/api/v1/streams/", timeout=3, follow_redirects=True)
             if resp.status_code == 200:
                 data = resp.json()
                 streams = []
@@ -186,6 +187,8 @@ class SnapshotService:
                         "has_snapshot": s.get("name") in _snapshots,
                     })
                 return streams
+            else:
+                logger.warning(f"获取SRS流列表失败: HTTP {resp.status_code}")
         except Exception as e:
             logger.warning(f"获取SRS流列表失败: {e}")
         return []
