@@ -2,6 +2,7 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 import httpx
+import json
 
 from ..core import SSH_CONFIG, API_PATHS, BASE_HEADERS, get_tunnel
 from ..schemas import (
@@ -105,6 +106,47 @@ async def start_experiment(req: StartExperimentRequest):
             )
             return Response(content=response.content, status_code=response.status_code, media_type="application/json")
     
+    except HTTPException:
+        raise
+    except httpx.ConnectError as e:
+        raise HTTPException(status_code=502, detail=f"无法连接到内网服务: {e}")
+
+
+@router.post("/mock/start-expirement")
+async def mock_start_expirement(req: StartExperimentRequest):
+    """（Mock）启动实验：返回匹配的实验 item，不真正触发启动"""
+    try:
+        get_tunnel()
+        headers = {**BASE_HEADERS, "authorization": req.authorization, "content-type": "application/json;charset=UTF-8"}
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            # 获取实验列表
+            list_resp = await client.get(
+                f"{_get_base_url()}/{API_PATHS['experiment_list']}",
+                params={"pageNum": 1, "pageSize": 100},
+                headers=headers,
+            )
+            data = list_resp.json()
+
+            # 查找目标实验
+            items = data.get("data", {})
+            if isinstance(items, dict):
+                items = items.get("list", [])
+
+            target = next((i for i in items if i.get("experienceCode") == req.exp_code), None)
+            if not target:
+                raise HTTPException(status_code=404, detail=f"未找到实验: {req.exp_code}")
+
+            # 启动实验（mock 版不执行）
+            # response = await client.post(
+            #     f"{_get_base_url()}/{API_PATHS['start_experiment']}",
+            #     json=target,
+            #     headers=headers,
+            # )
+            # return Response(content=response.content, status_code=response.status_code, media_type="application/json")
+
+            return Response(content=json.dumps(target, ensure_ascii=False), status_code=200, media_type="application/json")
+
     except HTTPException:
         raise
     except httpx.ConnectError as e:

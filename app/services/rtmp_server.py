@@ -217,6 +217,7 @@ class CameraRTMPController(SimpleRTMPController):
         AMF0Serializer.create_object(data, "_result")
         AMF0Serializer.create_object(data, transaction_id)
         AMF0Serializer.create_object(data, None)  # command object
+        AMF0Serializer.create_object(data, None)  # info (第4个元素)
         
         return Chunk(
             chunk_type=0,
