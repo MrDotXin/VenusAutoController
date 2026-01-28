@@ -2,10 +2,11 @@
 摄像头HTTP推流接收模块
 摄像头通过HTTP POST推送图片到服务器
 """
+import asyncio
 import time
 import logging
 import threading
-from typing import Optional, Dict, Generator
+from typing import Optional, Dict, Generator, AsyncGenerator
 from dataclasses import dataclass, field
 from collections import deque
 from datetime import datetime
@@ -77,16 +78,20 @@ class HTTPStreamReceiver:
             return stream.last_frame
         return None
     
-    def generate_mjpeg(self, stream_id: str) -> Generator[bytes, None, None]:
+    async def generate_mjpeg(self, stream_id: str) -> AsyncGenerator[bytes, None]:
         """
-        生成MJPEG视频流
+        生成MJPEG视频流（异步）
         前端可用 <img src="..."> 直接显示
         """
         last_frame = None
+        no_frame_count = 0
         while True:
             stream = self.streams.get(stream_id)
-            if stream and stream.last_frame:
-                # 只有帧变化时才发送
+            if not stream:
+                break
+            
+            if stream.last_frame:
+                no_frame_count = 0
                 if stream.last_frame != last_frame:
                     last_frame = stream.last_frame
                     yield (
@@ -95,7 +100,12 @@ class HTTPStreamReceiver:
                         stream.last_frame +
                         b'\r\n'
                     )
-            time.sleep(0.05)  # 20fps
+            else:
+                no_frame_count += 1
+                if no_frame_count > 600:  # 30秒无数据退出
+                    break
+            
+            await asyncio.sleep(0.05)  # 20fps
     
     def get_status(self, stream_id: str) -> Optional[dict]:
         """获取流状态"""
