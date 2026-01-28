@@ -41,10 +41,19 @@ async def camera_wildcard(stream_id: str, path: str, request: Request):
     content_type = request.headers.get("content-type", "")
     body = await request.body()
     
-    logger.info(f"[{stream_id}] {request.method} /{path} Content-Type: {content_type} Size: {len(body)} bytes")
+    # 打印请求内容用于调试
+    if "json" in content_type:
+        try:
+            import json
+            data = json.loads(body)
+            logger.info(f"[{stream_id}] {request.method} /{path} JSON: {data}")
+        except:
+            logger.info(f"[{stream_id}] {request.method} /{path} Body: {body[:200]}")
+    else:
+        logger.info(f"[{stream_id}] {request.method} /{path} Content-Type: {content_type} Size: {len(body)} bytes")
     
     # 如果是图片数据，保存帧
-    if body and ("image" in content_type or len(body) > 1000):
+    if body and ("image" in content_type or len(body) > 10000):
         stream_receiver.receive_frame(stream_id, body)
         return {"success": True}
     
