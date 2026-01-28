@@ -112,9 +112,8 @@ async def start_experiment(req: StartExperimentRequest):
         raise HTTPException(status_code=502, detail=f"无法连接到内网服务: {e}")
 
 
-@router.post("/mock/start-expirement")
 @router.post("/mock/start-experiment")
-async def mock_start_expirement(req: StartExperimentRequest):
+async def mock_start_experiment(req: StartExperimentRequest):
     """（Mock）启动实验：返回匹配的实验 item，不真正触发启动"""
     try:
         get_tunnel()
@@ -154,7 +153,7 @@ async def mock_start_expirement(req: StartExperimentRequest):
         raise HTTPException(status_code=502, detail=f"无法连接到内网服务: {e}")
 
 
-@router.post("/delete-expirement")
+@router.post("/delete-experiment")
 async def delete_experiment(req: DeleteExperimentRequest):
     """删除实验"""
     try:
