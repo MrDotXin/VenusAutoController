@@ -53,15 +53,20 @@ class HTTPStreamReceiver:
         摄像头POST数据到此方法
         """
         with self._lock:
-            if stream_id not in self.streams:
+            is_new = stream_id not in self.streams
+            if is_new:
                 self.streams[stream_id] = StreamInfo(stream_id=stream_id)
-                logger.info(f"新摄像头流: {stream_id}")
+                logger.info(f"新摄像头连接: {stream_id}")
             
             stream = self.streams[stream_id]
             stream.last_frame = frame_data
             stream._frame_buffer.append(frame_data)
             stream.frame_count += 1
             stream.last_update = time.time()
+            
+            # 每100帧输出一次统计日志
+            if stream.frame_count % 100 == 0:
+                logger.info(f"[{stream_id}] 已接收 {stream.frame_count} 帧, 当前帧大小: {len(frame_data)} bytes")
             
         return True
     
