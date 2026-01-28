@@ -31,3 +31,9 @@ BASE_HEADERS = {
     "appid": "api-server",
     "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
 }
+
+# SRS流媒体服务器配置
+SRS_CONFIG = {
+    "rtmp_url": os.getenv("SRS_RTMP_URL", "rtmp://localhost:1935/live"),
+    "api_url": os.getenv("SRS_API_URL", "http://localhost:5002"),
+}

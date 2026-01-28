@@ -1,21 +1,24 @@
 """
+"""
 SRS 截图服务模块
-从 SRS 服务器定时获取 RTMP 流截图
+从SRS 服务器定时获取 RTMP 流截图
 """
 import logging
 import subprocess
 import threading
 import time
-from typing import Dict, Optional
+import httpx
+from typing import Dict, Optional, List
 from dataclasses import dataclass
 
 from ..core.ffmpeg import get_ffmpeg_cmd
+from ..core.config import SRS_CONFIG
 
 logger = logging.getLogger(__name__)
 
 # SRS 服务器配置
-SRS_RTMP_URL = "rtmp://localhost:1935/live"
-
+SRS_RTMP_URL = SRS_CONFIG["rtmp_url"]
+SRS_API_URL = SRS_CONFIG["api_url"]
 # 截图缓存
 _snapshots: Dict[str, 'StreamSnapshot'] = {}
 
@@ -165,8 +168,28 @@ class SnapshotService:
         }
     
     def list_streams(self) -> list:
-        """列出所有流"""
+        """列出所有已注册的流（截图服务）"""
         return [self.get_status(key) for key in _snapshots.keys()]
+    
+    def list_srs_streams(self) -> List[dict]:
+        """从SRS获取当前在线的流列表"""
+        try:
+            resp = httpx.get(f"{SRS_API_URL}/api/v1/streams", timeout=3)
+            if resp.status_code == 200:
+                data = resp.json()
+                streams = []
+                for s in data.get("streams", []):
+                    streams.append({
+                        "stream_key": s.get("name"),
+                        "app": s.get("app"),
+                        "client_id": s.get("publish", {}).get("cid"),
+                        "is_online": True,
+                        "has_snapshot": s.get("name") in _snapshots,
+                    })
+                return streams
+        except Exception as e:
+            logger.warning(f"获取SRS流列表失败: {e}")
+        return []
     
     def remove_stream(self, stream_key: str) -> bool:
         """移除流"""

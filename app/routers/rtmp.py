@@ -16,7 +16,17 @@ router = APIRouter(prefix="/rtmp", tags=["RTMP视频流"])
 
 @router.get("/list")
 async def list_streams():
-    """列出所有已注册的流"""
+    """
+    列出所有在线的RTMP流（从SRS获取）
+    
+    返回 SRS 上当前正在推流的所有流
+    """
+    return {"success": True, "data": rtmp_server.list_srs_streams()}
+
+
+@router.get("/snapshots")
+async def list_snapshots():
+    """列出所有已注册截图的流"""
     return {"success": True, "data": rtmp_server.list_streams()}
 
 
