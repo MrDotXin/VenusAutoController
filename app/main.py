@@ -2,7 +2,6 @@
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -27,15 +26,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"SSH隧道建立失败: {e}")
     
-    # RTMP服务器
-    rtmp_task = asyncio.create_task(rtmp_server.start(port=1935))
-    logger.info("RTMP服务器已启动: rtmp://0.0.0.0:1935")
+    # SRS 截图服务会在首次请求时自动启动
+    logger.info("已配置SRS截图服务 (RTMP由SRS Docker处理)")
     
     yield
     
     # 清理
     rtmp_server.stop()
-    rtmp_task.cancel()
     stop_heartbeat()
     stop_tunnel()
 
