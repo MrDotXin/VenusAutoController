@@ -95,10 +95,20 @@ class CameraRTMPController(SimpleRTMPController):
     async def handle_message(self, session: SessionManager, message):
         """消息路由"""
         if isinstance(message, NCConnect):
+            # 打印connect响应
+            response = message.create_response()
+            logger.info(f"[RTMP] >>> 发送: connect _result")
+            logger.info(f"        payload={response.payload.hex()[:100]}...")
             await self.on_nc_connect(session, message)
         elif isinstance(message, NCCreateStream):
+            response = message.create_response()
+            logger.info(f"[RTMP] >>> 发送: createStream _result")
+            logger.info(f"        payload={response.payload.hex()}")
             await self.on_nc_create_stream(session, message)
         elif isinstance(message, NSPublish):
+            response = message.create_response()
+            logger.info(f"[RTMP] >>> 发送: publish onStatus")
+            logger.info(f"        payload={response.payload.hex()}")
             await self.on_ns_publish(session, message)
         elif isinstance(message, VideoMessage):
             await self.on_video_message(session, message)
