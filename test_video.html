@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>RTMP 视频流测试</title>
+  <script src="https://cdn.jsdelivr.net/npm/flv.js/dist/flv.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, sans-serif; padding: 20px; background: #0f0f0f; color: #e5e5e5; margin: 0; }
+    .container { max-width: 960px; margin: 0 auto; }
+    h1 { color: #fff; margin-bottom: 30px; }
+    video { width: 100%; aspect-ratio: 16/9; background: #000; border-radius: 12px; }
+    .card { margin: 20px 0; padding: 20px; background: #1a1a1a; border-radius: 12px; border: 1px solid #333; }
+    .card h3 { margin: 0 0 15px 0; color: #fff; font-size: 16px; }
+    .stream-item { display: flex; align-items: center; padding: 10px; background: #252525; border-radius: 8px; margin: 8px 0; }
+    .stream-item .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; margin-right: 12px; }
+    .stream-item .name { flex: 1; font-weight: 500; }
+    .stream-item button { padding: 6px 16px; font-size: 13px; }
+    .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    input { padding: 12px 16px; border: 1px solid #333; border-radius: 8px; background: #252525; color: #fff; font-size: 14px; width: 200px; }
+    input:focus { outline: none; border-color: #3b82f6; }
+    button { padding: 12px 24px; cursor: pointer; border: none; border-radius: 8px; background: #3b82f6; color: #fff; font-size: 14px; font-weight: 500; transition: background 0.2s; }
+    button:hover { background: #2563eb; }
+    button.secondary { background: #333; }
+    button.secondary:hover { background: #444; }
+    .url-display { font-size: 13px; color: #888; word-break: break-all; }
+    .url-display code { background: #252525; padding: 4px 8px; border-radius: 4px; color: #60a5fa; }
+    .empty { color: #666; font-style: italic; }
+    .error { color: #f87171; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>📹 RTMP 视频流测试</h1>
+    
+    <div class="card">
+      <h3>在线流列表 <button onclick="loadStreams()" style="padding:6px 12px;font-size:12px;margin-left:10px;">刷新</button></h3>
+      <div id="streamList"><span class="empty">加载中...</span></div>
+    </div>
+    
+    <div class="card">
+      <h3>播放控制</h3>
+      <div class="controls">
+        <input id="streamKey" type="text" value="camera1" placeholder="输入流名称">
+        <button onclick="playStream()">▶ 播放</button>
+        <button onclick="stopStream()" class="secondary">■ 停止</button>
+      </div>
+    </div>
+    
+    <video id="video" controls muted></video>
+    
+    <div class="card">
+      <h3>当前播放地址</h3>
+      <p class="url-display">FLV: <code id="flvUrl">-</code></p>
+      <p class="url-display">HLS: <code id="hlsUrl">-</code></p>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = 'https://venusfactory.cn/venus-auto';
+    
+    let player = null;
+    
+    async function loadStreams() {
+      const container = document.getElementById('streamList');
+      try {
+        const res = await fetch(`${API_BASE}/rtmp/list`);
+        const data = await res.json();
+        
+        if (data.success && data.data.length > 0) {
+          container.innerHTML = data.data.map(s => `
+            <div class="stream-item">
+              <span class="dot"></span>
+              <span class="name">${s.stream_key}</span>
+              <span style="color:#888;margin-right:15px;">app: ${s.app}</span>
+              <button onclick="playByKey('${s.stream_key}')">播放</button>
+            </div>
+          `).join('');
+        } else {
+          container.innerHTML = '<span class="empty">暂无在线流</span>';
+        }
+      } catch (e) {
+        container.innerHTML = `<span class="error">获取失败: ${e.message}</span>`;
+      }
+    }
+    
+    function playByKey(key) {
+      document.getElementById('streamKey').value = key;
+      playStream();
+    }
+    
+    function playStream() {
+      const key = document.getElementById('streamKey').value || 'camera1';
+      const flvUrl = `${API_BASE}/rtmp/play/${key}.flv`;
+      const hlsUrl = `${API_BASE}/rtmp/play/${key}.m3u8`;
+      
+      document.getElementById('flvUrl').textContent = flvUrl;
+      document.getElementById('hlsUrl').textContent = hlsUrl;
+      
+      stopStream();
+      
+      if (flvjs.isSupported()) {
+        player = flvjs.createPlayer({
+          type: 'flv',
+          url: flvUrl,
+          isLive: true
+        });
+        player.attachMediaElement(document.getElementById('video'));
+        player.load();
+        player.play();
+      } else {
+        alert('浏览器不支持 FLV 播放');
+      }
+    }
+    
+    function stopStream() {
+      if (player) {
+        player.pause();
+        player.unload();
+        player.detachMediaElement();
+        player.destroy();
+        player = null;
+      }
+    }
+    
+    // 页面加载时获取流列表
+    loadStreams();
+  </script>
+</body>
+</html>
