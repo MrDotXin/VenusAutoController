@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 # SRS 服务器配置
 SRS_RTMP_URL = SRS_CONFIG["rtmp_url"]
+SRS_HTTP_URL = SRS_CONFIG["http_url"]
 SRS_API_URL = SRS_CONFIG["api_url"]
 # 截图缓存
 _snapshots: Dict[str, 'StreamSnapshot'] = {}
@@ -88,16 +89,17 @@ class SnapshotService:
             logger.error("ffmpeg不可用")
             return
         
-        rtmp_url = f"{SRS_RTMP_URL}/{stream_key}"
+        # 优先用 HTTP-FLV，更可靠
+        stream_url = f"{SRS_HTTP_URL}/live/{stream_key}.flv"
         fail_count = 0
         
         while snapshot._running:
             try:
-                # 使用 ffmpeg 从 RTMP 流截取一帧
+                # 使用 ffmpeg 从 HTTP-FLV 流截取一帧
                 cmd = [
                     ffmpeg_cmd,
                     '-y',
-                    '-i', rtmp_url,
+                    '-i', stream_url,
                     '-vframes', '1',
                     '-f', 'image2pipe',
                     '-vcodec', 'mjpeg',
